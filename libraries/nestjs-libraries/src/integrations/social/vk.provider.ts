@@ -34,6 +34,21 @@ export class VkProvider extends SocialAbstract implements SocialProvider {
     return 2048;
   }
 
+  /**
+   * GoodMG patch: if VK_GROUP_ID env is set, target a community wall via
+   * owner_id = -groupId.  Falls back to the authenticated user's own wall.
+   */
+  private getTargetOwnerId(userId: string): string {
+    const groupId = process.env.VK_GROUP_ID;
+    if (groupId && /^\d+$/.test(groupId)) {
+      return `-${groupId}`;
+    }
+    return userId;
+  }
+  private isPostingToGroup(): boolean {
+    return !!process.env.VK_GROUP_ID && /^\d+$/.test(process.env.VK_GROUP_ID);
+  }
+
   async refreshToken(refresh: string): Promise<AuthTokenDetails> {
     const [oldRefreshToken, device_id] = refresh.split('&&&&');
     const formData = new FormData();
@@ -165,13 +180,21 @@ export class VkProvider extends SocialAbstract implements SocialProvider {
     accessToken: string,
     post: PostDetails
   ): Promise<{ id: string; type: string }[]> {
+    const targetOwnerId = this.getTargetOwnerId(userId);
+    // For video.save we pass group_id (positive) when posting to a community;
+    // for photo upload server we pass owner_id (negative for community).
+    const groupId = this.isPostingToGroup()
+      ? process.env.VK_GROUP_ID
+      : undefined;
     return await Promise.all(
       (post?.media || []).map(async (media) => {
         const all = await (
           await this.fetch(
             hasExtension(media.path, 'mp4')
-              ? `https://api.vk.com/method/video.save?access_token=${accessToken}&v=5.251`
-              : `https://api.vk.com/method/photos.getWallUploadServer?owner_id=${userId}&access_token=${accessToken}&v=5.251`
+              ? `https://api.vk.com/method/video.save?access_token=${accessToken}&v=5.251${
+                  groupId ? `&group_id=${groupId}` : ''
+                }`
+              : `https://api.vk.com/method/photos.getWallUploadServer?owner_id=${targetOwnerId}&access_token=${accessToken}&v=5.251`
           )
         ).json();
 
@@ -206,6 +229,10 @@ export class VkProvider extends SocialAbstract implements SocialProvider {
         formSend.append('server', value.server);
         formSend.append('hash', value.hash);
 
+        // saveWallPhoto must match the upload server's owner_id
+        if (groupId) {
+          formSend.append('group_id', groupId);
+        }
         const { id } = (
           await (
             await fetch(
@@ -232,17 +259,24 @@ export class VkProvider extends SocialAbstract implements SocialProvider {
     postDetails: PostDetails[]
   ): Promise<PostResponse[]> {
     const [firstPost] = postDetails;
+    const targetOwnerId = this.getTargetOwnerId(userId);
+    const postingToGroup = this.isPostingToGroup();
 
     // Upload media for the first post
     const mediaList = await this.uploadMedia(userId, accessToken, firstPost);
 
     const body = new FormData();
     body.append('message', firstPost.message);
+    body.append('owner_id', targetOwnerId);
+    if (postingToGroup) {
+      body.append('from_group', '1');
+    }
 
     if (mediaList.length) {
       body.append(
         'attachments',
-        mediaList.map((p) => `${p.type}${userId}_${p.id}`).join(',')
+        // Attachments use the wall owner's id (negative for community)
+        mediaList.map((p) => `${p.type}${targetOwnerId}_${p.id}`).join(',')
       );
     }
 
@@ -260,7 +294,7 @@ export class VkProvider extends SocialAbstract implements SocialProvider {
       {
         id: firstPost.id,
         postId: String(response?.post_id),
-        releaseURL: `https://vk.com/feed?w=wall${userId}_${response?.post_id}`,
+        releaseURL: `https://vk.com/wall${targetOwnerId}_${response?.post_id}`,
         status: 'completed',
       },
     ];
@@ -275,6 +309,8 @@ export class VkProvider extends SocialAbstract implements SocialProvider {
     integration: Integration
   ): Promise<PostResponse[]> {
     const [commentPost] = postDetails;
+    const targetOwnerId = this.getTargetOwnerId(userId);
+    const postingToGroup = this.isPostingToGroup();
 
     // Upload media for the comment
     const mediaList = await this.uploadMedia(userId, accessToken, commentPost);
@@ -282,11 +318,15 @@ export class VkProvider extends SocialAbstract implements SocialProvider {
     const body = new FormData();
     body.append('message', commentPost.message);
     body.append('post_id', postId);
+    body.append('owner_id', targetOwnerId);
+    if (postingToGroup) {
+      body.append('from_group', '1');
+    }
 
     if (mediaList.length) {
       body.append(
         'attachments',
-        mediaList.map((p) => `${p.type}${userId}_${p.id}`).join(',')
+        mediaList.map((p) => `${p.type}${targetOwnerId}_${p.id}`).join(',')
       );
     }
 
@@ -304,7 +344,7 @@ export class VkProvider extends SocialAbstract implements SocialProvider {
       {
         id: commentPost.id,
         postId: String(response?.comment_id),
-        releaseURL: `https://vk.com/feed?w=wall${userId}_${postId}`,
+        releaseURL: `https://vk.com/wall${targetOwnerId}_${postId}`,
         status: 'completed',
       },
     ];
