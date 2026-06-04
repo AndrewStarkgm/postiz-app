@@ -49,6 +49,21 @@ export class VkProvider extends SocialAbstract implements SocialProvider {
     return !!process.env.VK_GROUP_ID && /^\d+$/.test(process.env.VK_GROUP_ID);
   }
 
+  /**
+   * GoodMG patch: VK ID user tokens cannot wall.post into a community
+   * (error 1051 "method is unavailable with current profile type").
+   * If VK_GROUP_ACCESS_TOKEN is set (a Kate Mobile / standalone-app user token
+   * with manage scope, or a real community access token), use it for any
+   * wall / photos / video API call that targets the community wall.
+   * Falls back to the authenticated user's access token.
+   */
+  private getPostingToken(userAccessToken: string): string {
+    if (this.isPostingToGroup() && process.env.VK_GROUP_ACCESS_TOKEN) {
+      return process.env.VK_GROUP_ACCESS_TOKEN;
+    }
+    return userAccessToken;
+  }
+
   async refreshToken(refresh: string): Promise<AuthTokenDetails> {
     const [oldRefreshToken, device_id] = refresh.split('&&&&');
     const formData = new FormData();
@@ -186,15 +201,17 @@ export class VkProvider extends SocialAbstract implements SocialProvider {
     const groupId = this.isPostingToGroup()
       ? process.env.VK_GROUP_ID
       : undefined;
+    // Use group-capable token when targeting a community wall.
+    const apiToken = this.getPostingToken(accessToken);
     return await Promise.all(
       (post?.media || []).map(async (media) => {
         const all = await (
           await this.fetch(
             hasExtension(media.path, 'mp4')
-              ? `https://api.vk.com/method/video.save?access_token=${accessToken}&v=5.251${
+              ? `https://api.vk.com/method/video.save?access_token=${apiToken}&v=5.251${
                   groupId ? `&group_id=${groupId}` : ''
                 }`
-              : `https://api.vk.com/method/photos.getWallUploadServer?owner_id=${targetOwnerId}&access_token=${accessToken}&v=5.251`
+              : `https://api.vk.com/method/photos.getWallUploadServer?owner_id=${targetOwnerId}&access_token=${apiToken}&v=5.251`
           )
         ).json();
 
@@ -236,7 +253,7 @@ export class VkProvider extends SocialAbstract implements SocialProvider {
         const { id } = (
           await (
             await fetch(
-              `https://api.vk.com/method/photos.saveWallPhoto?access_token=${accessToken}&v=5.251`,
+              `https://api.vk.com/method/photos.saveWallPhoto?access_token=${apiToken}&v=5.251`,
               {
                 method: 'POST',
                 body: formSend,
@@ -261,6 +278,7 @@ export class VkProvider extends SocialAbstract implements SocialProvider {
     const [firstPost] = postDetails;
     const targetOwnerId = this.getTargetOwnerId(userId);
     const postingToGroup = this.isPostingToGroup();
+    const apiToken = this.getPostingToken(accessToken);
 
     // Upload media for the first post
     const mediaList = await this.uploadMedia(userId, accessToken, firstPost);
@@ -282,7 +300,7 @@ export class VkProvider extends SocialAbstract implements SocialProvider {
 
     const { response } = await (
       await this.fetch(
-        `https://api.vk.com/method/wall.post?v=5.251&access_token=${accessToken}&client_id=${process.env.VK_ID}`,
+        `https://api.vk.com/method/wall.post?v=5.251&access_token=${apiToken}&client_id=${process.env.VK_ID}`,
         {
           method: 'POST',
           body,
@@ -311,6 +329,7 @@ export class VkProvider extends SocialAbstract implements SocialProvider {
     const [commentPost] = postDetails;
     const targetOwnerId = this.getTargetOwnerId(userId);
     const postingToGroup = this.isPostingToGroup();
+    const apiToken = this.getPostingToken(accessToken);
 
     // Upload media for the comment
     const mediaList = await this.uploadMedia(userId, accessToken, commentPost);
@@ -332,7 +351,7 @@ export class VkProvider extends SocialAbstract implements SocialProvider {
 
     const { response } = await (
       await this.fetch(
-        `https://api.vk.com/method/wall.createComment?v=5.251&access_token=${accessToken}&client_id=${process.env.VK_ID}`,
+        `https://api.vk.com/method/wall.createComment?v=5.251&access_token=${apiToken}&client_id=${process.env.VK_ID}`,
         {
           method: 'POST',
           body,
