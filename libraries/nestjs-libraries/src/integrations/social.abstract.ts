@@ -149,7 +149,19 @@ export abstract class SocialAbstract {
     totalRetries = 0,
     ignoreConcurrency = false
   ): Promise<Response> {
-    const request = await fetch(url, options);
+    // GoodMG patch: networks behind a flaky obfuscated VPN tunnel (RU -> Meta)
+    // drop large TLS flows in waves. A raw `await fetch` throws ConnectTimeout
+    // and the whole publish fails. Retry transient *connection* errors (the
+    // request never reached the server, so retries can't duplicate a post)
+    // long enough to ride out a tunnel flap window.
+    const netRetries = Number(process.env.POSTIZ_NET_RETRY ?? 8);
+    const netRetryDelay = Number(process.env.POSTIZ_NET_RETRY_DELAY_MS ?? 8000);
+    const request = await this.fetchWithNetworkRetry(
+      url,
+      options,
+      netRetries,
+      netRetryDelay
+    );
 
     if (request.status === 200 || request.status === 201) {
       return request;
@@ -214,6 +226,52 @@ export abstract class SocialAbstract {
       options.body!,
       handleError?.value || 'Unknown Error'
     );
+  }
+
+  /**
+   * GoodMG patch: wrap the raw network call so that transient connection
+   * failures (ConnectTimeout / "fetch failed" / ECONNRESET / ETIMEDOUT) are
+   * retried. Only connection-level errors are retried — an established
+   * response (any HTTP status) is returned untouched so the normal status
+   * handling above still runs. Connection errors mean the request never
+   * reached the server, so retrying is safe for non-idempotent POSTs too.
+   */
+  private async fetchWithNetworkRetry(
+    url: string,
+    options: RequestInit,
+    retriesLeft: number,
+    delayMs: number,
+    attempt = 0
+  ): Promise<Response> {
+    try {
+      return await fetch(url, options);
+    } catch (err: any) {
+      const code =
+        err?.cause?.code || err?.code || err?.name || String(err?.message || '');
+      const isTransient =
+        /ConnectTimeout|UND_ERR_CONNECT_TIMEOUT|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|ENETUNREACH|fetch failed|aborted|terminated/i.test(
+          String(code) + ' ' + String(err?.message || '')
+        );
+
+      if (!isTransient || retriesLeft <= 0) {
+        throw err;
+      }
+
+      // eslint-disable-next-line no-console
+      console.log(
+        `[net-retry] ${url.split('?')[0]} failed (${code}); retry ${
+          attempt + 1
+        }, ${retriesLeft - 1} left, waiting ${delayMs}ms`
+      );
+      await timer(delayMs);
+      return this.fetchWithNetworkRetry(
+        url,
+        options,
+        retriesLeft - 1,
+        delayMs,
+        attempt + 1
+      );
+    }
   }
 
   checkScopes(required: string[], got: string | string[]) {

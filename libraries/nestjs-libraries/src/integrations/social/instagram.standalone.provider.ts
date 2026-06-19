@@ -28,6 +28,9 @@ export class InstagramStandaloneProvider
   name = 'Instagram\n(Standalone)';
   isBetweenSteps = false;
   refreshCron = true;
+  // GoodMG patch: Instagram Graph API only ingests JPEG; PNG/WebP uploads fail
+  // with "Media fetch failed". Have Postiz transcode media to JPEG first.
+  convertToJPEG = true;
   scopes = [
     'instagram_business_basic',
     'instagram_business_content_publish',
